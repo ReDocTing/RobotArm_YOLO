@@ -128,7 +128,13 @@ def main():
         except ImportError:
             print("[错误] 未安装 pyorbbecsdk")
             sys.exit(1)
-            
+
+        try:
+            from pyorbbecsdk import Context, OBLogSeverity
+            Context().set_logger_severity(OBLogSeverity.FATAL)
+        except Exception:
+            pass
+
         try:
             pipeline = Pipeline()
         except Exception as e:

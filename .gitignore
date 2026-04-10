@@ -5,3 +5,5 @@ data
 scripts/*
 !scripts/main.py
 mobileclip2_b.ts
+sdk
+PLAN.md

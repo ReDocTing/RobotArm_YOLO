@@ -5,7 +5,7 @@
 
 camera:
   # 相机类型：realsense_d435i | realsense_d405 | orbbec_gemini2
-  type: realsense_d435i
+  type: orbbec_gemini2
   serial: null          # 设备序列号；null = 自动选择第一个
   color_width: 1280
   color_height: 720
@@ -50,6 +50,15 @@ localization:
   min_depth_m: 0.1      # 有效深度下限（米）
   max_depth_m: 5.0      # 有效深度上限（米）
 
+robot:
+  # reBotArm_control_py 仓库路径（null = 自动搜索 ~/seeed/reBotArm_control_py）
+  repo_root: null
+  # 以下两项 null 时使用仓库内默认路径
+  config_path: null   # robot.yaml 路径
+  urdf_path: null     # URDF 文件路径
+  # 手动输入时的位姿格式：xyz_euler_rad | xyz_euler_deg | xyzw_quat
+  pose_convention: xyz_euler_rad
+
 yolo:
   # ==========================================
   # 模型选择库 (自动从 models/ 目录加载或下载)
@@ -72,19 +81,10 @@ yolo:
   use_world: true
 
   custom_classes:
-    - "person"
-    - "laptop"
     - "book"
-    - "monitor"
-    - "keyboard"
     - "mouse"
-    - "chair"
-    - "table"
-    - "window"
-    - "door"
     - "pen"
     - "notebook"
-    - "laptop"
     - "smartphone"
     - "water bottle"
     - "coffee cup"
