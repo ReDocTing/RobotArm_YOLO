@@ -84,7 +84,11 @@ class RebotArm:
         self._endpos_ctrl: Optional[ArmEndPos] = None
         self._ArmEndPos = ArmEndPos
 
-        self._connected = False
+        self._connected    = False
+        self._gripper_mot  = None  # 夹爪电机句柄，由 init_gripper() 注册
+        self._gripper_kp   = 5.0   # MIT kp，从 gripper.yaml 加载
+        self._gripper_kd   = 1.0   # MIT kd，从 gripper.yaml 加载
+        self._gripper_ctrl = None  # 共用的 Controller 引用
 
     # ── 生命周期 ─────────────────────────────────────────────────────────────
 
@@ -115,12 +119,172 @@ class RebotArm:
             except Exception:
                 pass
             self._endpos_ctrl = None
+        if self._gripper is not None:
+            try:
+                self._gripper.disconnect()
+            except Exception:
+                pass
+            self._gripper = None
         try:
             self._arm.disconnect()
         except Exception:
             pass
         self._connected = False
         print("[RebotArm] 已断开连接")
+
+    # ── 夹爪 ─────────────────────────────────────────────────────────────────
+    # 夹爪电机直接注册到机械臂已有的 CAN Controller，共用同一条总线，
+    # 不再实例化独立的 Gripper 类，避免同端口双重连接冲突。
+
+    # 夹爪物理参数
+    _GRIPPER_MAX_DIST_M = 0.09   # 最大开合距离 (m)
+    _GRIPPER_ANGLE_OPEN = -5.0   # 完全张开对应电机角度 (rad)
+    # 映射：0 rad = 闭合(0 cm)，-5 rad = 完全张开(9 cm)
+
+    def init_gripper(self, cfg_path: Optional[str] = None) -> None:
+        """将夹爪电机注册到机械臂已有的 CAN 总线控制器。
+
+        夹爪和机械臂共用同一个 Controller 实例，不另开串口连接。
+
+        Args:
+            cfg_path: gripper.yaml 路径；None = 使用 reBotArm_control_py/config/gripper.yaml
+        """
+        from reBotArm_control_py.actuator.gripper import load_cfg as load_gripper_cfg
+        from motorbridge import Mode, CallError
+
+        if cfg_path is None:
+            repo = _find_repo_root()
+            cfg_path = str(repo / "config" / "gripper.yaml")
+
+        gcfg = load_gripper_cfg(cfg_path)
+        gc = gcfg["gripper"]
+
+        # 复用机械臂已有的 Controller（同 vendor 则共用，否则报错）
+        vendor = gc.vendor
+        if vendor not in self._arm._ctrl_map:
+            raise RuntimeError(
+                f"夹爪 vendor={vendor!r} 与机械臂 vendor 不同，"
+                "无法共用 Controller，请确认配置文件"
+            )
+        ctrl = self._arm._ctrl_map[vendor]
+
+        # 注册夹爪电机到已有控制器
+        if vendor == "damiao":
+            self._gripper_mot = ctrl.add_damiao_motor(
+                gc.motor_id, gc.feedback_id, gc.model
+            )
+        elif vendor == "myactuator":
+            self._gripper_mot = ctrl.add_myactuator_motor(
+                gc.motor_id, gc.feedback_id, gc.model
+            )
+        elif vendor == "robstride":
+            self._gripper_mot = ctrl.add_robstride_motor(
+                gc.motor_id, gc.feedback_id, gc.model
+            )
+        else:
+            raise ValueError(f"不支持的夹爪 vendor: {vendor!r}")
+
+        self._gripper_kp   = gc.kp   # ← gripper.yaml MIT.kp
+        self._gripper_kd   = gc.kd   # ← gripper.yaml MIT.kd
+        self._gripper_ctrl = ctrl    # 保存引用，用于 poll
+
+        # 使能并切换 MIT 模式
+        try:
+            ctrl.enable_all()
+            time.sleep(0.3)
+        except CallError as e:
+            print(f"[RebotArm] 夹爪使能警告: {e}")
+        try:
+            self._gripper_mot.ensure_mode(Mode.MIT, 1000)
+        except CallError as e:
+            raise RuntimeError(f"夹爪 MIT 模式切换失败: {e}") from e
+
+        print("[RebotArm] 夹爪已注册到 CAN 总线 (MIT)")
+
+    @property
+    def has_gripper(self) -> bool:
+        return self._gripper_mot is not None
+
+    def set_gripper_opening(self, distance_m: float) -> None:
+        """按开合距离控制夹爪（MIT 模式，非阻塞）。
+
+        Args:
+            distance_m: 开合距离（米），0.0 = 完全夹紧，0.09 = 完全张开
+        """
+        if self._gripper_mot is None:
+            return
+        d = float(np.clip(distance_m, 0.0, self._GRIPPER_MAX_DIST_M))
+        angle = (d / self._GRIPPER_MAX_DIST_M) * self._GRIPPER_ANGLE_OPEN
+        try:
+            self._gripper_mot.send_mit(
+                float(angle), 0.0,
+                float(self._gripper_kp), float(self._gripper_kd), 0.0,
+            )
+            self._gripper_mot.request_feedback()
+            self._gripper_ctrl.poll_feedback_once()
+        except Exception as e:
+            print(f"[RebotArm] 夹爪指令发送失败: {e}")
+
+    def open_gripper(self, distance_m: float = 0.09) -> None:
+        """张开夹爪（非阻塞）。
+
+        Args:
+            distance_m: 张开距离（米），默认完全张开 0.09 m
+        """
+        self.set_gripper_opening(distance_m)
+
+    def close_gripper(self) -> None:
+        """夹紧夹爪（非阻塞）。"""
+        self.set_gripper_opening(0.0)
+
+    def get_gripper_state(self) -> tuple:
+        """读取夹爪电机状态。
+
+        Returns:
+            (pos_rad, vel_rad_s, torq_nm)，未初始化时返回 (0.0, 0.0, 0.0)。
+        """
+        if self._gripper_mot is None:
+            return (0.0, 0.0, 0.0)
+        try:
+            self._gripper_mot.request_feedback()
+            self._gripper_ctrl.poll_feedback_once()
+            st = self._gripper_mot.get_state()
+            if st is not None:
+                return (float(st.pos), float(st.vel), float(st.torq))
+        except Exception:
+            pass
+        return (0.0, 0.0, 0.0)
+
+    def hold_gripper_with_torque(self, target_torque_nm: float) -> None:
+        """接触后施加前馈扭矩，将夹取力标准化为 target_torque_nm。
+
+        原理：MIT 总输出 = kp*(q_des - q_actual) + tau_ff
+             令总输出 = target_torque_nm，解得 tau_ff：
+             tau_ff = target_torque_nm - kp*(0 - q_contact)
+                    = target_torque_nm + kp*q_contact   （q_contact < 0）
+
+        Args:
+            target_torque_nm: 目标夹取力矩（Nm），根据应用场景调整
+        """
+        if self._gripper_mot is None:
+            return
+        try:
+            self._gripper_mot.request_feedback()
+            self._gripper_ctrl.poll_feedback_once()
+            st = self._gripper_mot.get_state()
+            if st is None:
+                return
+            q_contact = float(st.pos)
+            tau_ff = target_torque_nm - self._gripper_kp * (0.0 - q_contact)
+            self._gripper_mot.send_mit(
+                0.0, 0.0,
+                float(self._gripper_kp), float(self._gripper_kd),
+                float(tau_ff),
+            )
+            self._gripper_mot.request_feedback()
+            self._gripper_ctrl.poll_feedback_once()
+        except Exception as e:
+            print(f"[RebotArm] 夹爪前馈控制失败: {e}")
 
     # ── 状态读取 ─────────────────────────────────────────────────────────────
 

@@ -4,6 +4,7 @@ Log
 data
 scripts/*
 !scripts/main.py
+!scripts/grasp.py
 !scripts/collect_handeye_eih.py
 !scripts/pca_grasp_pipeline.py
 mobileclip2_b.ts
