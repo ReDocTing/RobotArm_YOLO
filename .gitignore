@@ -7,6 +7,9 @@ scripts/*
 !scripts/grasp.py
 !scripts/collect_handeye_eih.py
 !scripts/pca_grasp_pipeline.py
+!scripts/grasp_estimate.py
+!scripts/gripper.py
+!scripts/hggd_grasp_pipeline.py
 mobileclip2_b.ts
 sdk
 PLAN.md

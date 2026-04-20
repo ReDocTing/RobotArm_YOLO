@@ -82,3 +82,68 @@ def mat4_to_pose6d(T: np.ndarray) -> tuple:
     rx = np.arctan2(R[2, 1], R[2, 2])
     rz = np.arctan2(R[1, 0], R[0, 0])
     return x, y, z, rx, ry, rz
+
+
+def rotation_matrix_to_euler_zyx(R: np.ndarray) -> np.ndarray:
+    """将旋转矩阵转换为 ZYX 内旋欧拉角 (roll, pitch, yaw)。"""
+    R = np.asarray(R, dtype=np.float64)
+    sy = np.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
+    if sy > 1e-6:
+        rx = np.arctan2(R[2, 1], R[2, 2])
+        ry = np.arctan2(-R[2, 0], sy)
+        rz = np.arctan2(R[1, 0], R[0, 0])
+    else:
+        rx = np.arctan2(-R[1, 2], R[1, 1])
+        ry = np.arctan2(-R[2, 0], sy)
+        rz = 0.0
+    return np.array([rx, ry, rz], dtype=np.float64)
+
+
+def grasp_axes_to_rebot_tcp_rotation(
+    grip_axis: np.ndarray,
+    open_axis: np.ndarray,
+    approach_axis: np.ndarray,
+) -> np.ndarray:
+    """将抓取坐标系映射到 reBotArm 的 TCP 坐标系。
+
+    视觉抓取结果约定：
+      - X = grip_axis
+      - Y = open_axis
+      - Z = approach_axis
+
+    reBotArm 末端期望：
+      - X = 工具前向 / 接近方向
+      - Y = 夹爪开合方向
+      - Z = 由右手系补齐
+    """
+    grip = np.asarray(grip_axis, dtype=np.float64)
+    open_vec = np.asarray(open_axis, dtype=np.float64)
+    approach = np.asarray(approach_axis, dtype=np.float64)
+
+    grip /= max(np.linalg.norm(grip), 1e-8)
+    open_vec /= max(np.linalg.norm(open_vec), 1e-8)
+    approach /= max(np.linalg.norm(approach), 1e-8)
+
+    tcp_x = approach
+    tcp_y = open_vec - float(np.dot(open_vec, tcp_x)) * tcp_x
+    tcp_y /= max(np.linalg.norm(tcp_y), 1e-8)
+    tcp_z = np.cross(tcp_x, tcp_y)
+    tcp_z /= max(np.linalg.norm(tcp_z), 1e-8)
+
+    # 期望 tcp_z 与 -grip 同向，这样工具前向与夹爪开合同视觉候选一致。
+    if float(np.dot(tcp_z, -grip)) < 0.0:
+        tcp_y = -tcp_y
+        tcp_z = -tcp_z
+
+    R = np.column_stack([tcp_x, tcp_y, tcp_z]).astype(np.float64)
+    if np.linalg.det(R) < 0.0:
+        R[:, 2] *= -1.0
+    return R
+
+
+def grasp_rotation_to_rebot_tcp_rotation(grasp_rotation: np.ndarray) -> np.ndarray:
+    """将 [grip, open, approach] 旋转矩阵转换为 reBotArm TCP 旋转矩阵。"""
+    R = np.asarray(grasp_rotation, dtype=np.float64)
+    if R.shape != (3, 3):
+        raise ValueError(f"grasp_rotation 必须为 (3, 3)，实际为 {R.shape}")
+    return grasp_axes_to_rebot_tcp_rotation(R[:, 0], R[:, 1], R[:, 2])

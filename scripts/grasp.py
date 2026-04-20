@@ -27,6 +27,7 @@ os.environ.setdefault("QT_QPA_FONTDIR", "/usr/share/fonts/truetype")
 
 import sys
 import time
+import threading
 import argparse
 from enum import Enum
 
@@ -129,10 +130,8 @@ LIFT_Z_OFFSET     = 0.10   # 提升高于抓取点 (m)
 GRASP_MOVE_DUR    = 1.5    # 每段轨迹时长 (s)
 GRIPPER_OPEN_WAIT       = 0.8    # 张开等待时间 (s)
 GRIPPER_OPEN_M          = 0.09   # 张开距离 (m)，对应电机 -5 rad
-GRASP_STALL_VEL         = 0.05   # 接触判定速度阈值 (rad/s)，低于此值视为夹到物体
 GRASP_STARTUP_DELAY     = 0.3    # 启动阶段跳过时间 (s)，等待电机开始运动
 GRASP_DETECT_TIMEOUT    = 2.0    # 接触检测超时 (s)，超时后继续提升
-GRASP_STD_TORQUE        = 0.5    # 标准夹取力矩 (Nm) — 根据实际场景调整
 
 
 class GraspState(Enum):
@@ -158,11 +157,15 @@ class GraspFSM:
 
     def __init__(self):
         self.state        = GraspState.IDLE
-        self._deadline    = 0.0      # 当前阶段结束时刻 (time.monotonic)
-        self._approach    = None     # (x, y, z, roll, pitch, yaw)
+        self._deadline    = 0.0
+        self._approach    = None
         self._grasp       = None
         self._lift        = None
-        self._grasp_start = 0.0      # 发送夹紧指令的时刻，用于跳过启动阶段
+        self._grasp_start = 0.0
+
+    def _do_grasp(self, robot) -> None:
+        """后台线程：执行阻塞夹取，结果反映在 gripper_is_holding。"""
+        robot.grasp()
 
     @property
     def active(self) -> bool:
@@ -194,38 +197,39 @@ class GraspFSM:
         now = time.monotonic()
 
         if s == GraspState.OPEN:
-            if self._deadline == 0.0:          # 首次进入：发送张开指令
-                robot.open_gripper(GRIPPER_OPEN_M)
+            if self._deadline == 0.0:
+                threading.Thread(target=robot.open_gripper, args=(GRIPPER_OPEN_M,), daemon=True).start()
                 print("[抓取] 张开夹爪...")
                 self._deadline = now + GRIPPER_OPEN_WAIT
             elif now >= self._deadline:
                 self._move_to(robot, self._approach, GraspState.APPROACH)
-
         elif s == GraspState.APPROACH:
             if now >= self._deadline:          # 接近点到达：下降至抓取位置
                 self._move_to(robot, self._grasp, GraspState.DESCEND)
 
         elif s == GraspState.DESCEND:
-            if now >= self._deadline:          # 抓取位置到达：发送夹紧指令
-                robot.close_gripper()
-                print("[抓取] 夹紧中，监测电机速度...")
+            if now >= self._deadline:
+                # 确保夹爪已打开再开始夹取
+                if not robot.has_gripper:
+                    self._move_to(robot, self._lift, GraspState.LIFT)
+                    return
+                robot.open_gripper(GRIPPER_OPEN_M)   # 阻塞确认已开
+                print("[抓取] 夹紧中...")
                 self._grasp_start = now
                 self.state        = GraspState.GRASP
                 self._deadline    = now + GRASP_DETECT_TIMEOUT
+                threading.Thread(target=self._do_grasp, args=(robot,), daemon=True).start()
 
         elif s == GraspState.GRASP:
             if now - self._grasp_start < GRASP_STARTUP_DELAY:
-                pass   # 启动阶段：等待电机开始运动，跳过速度检测
+                pass
             else:
-                pos, vel, torq = robot.get_gripper_state()
-                if abs(vel) <= GRASP_STALL_VEL:
-                    # 速度趋零 → 被物体阻挡，施加前馈使夹取力标准化
-                    robot.hold_gripper_with_torque(GRASP_STD_TORQUE)
-                    print(f"[抓取] 接触（vel={vel:.3f} rad/s, pos={pos:.3f} rad）"
-                          f" → 标准力矩 {GRASP_STD_TORQUE} Nm，开始提升")
+                if robot.gripper_is_holding:
+                    pos, _, _ = robot.get_gripper_state()
+                    print(f"[抓取] 接触（pos={pos:.3f} rad）→ 开始提升")
                     self._move_to(robot, self._lift, GraspState.LIFT)
-                elif now >= self._deadline:    # 超时兜底
-                    print(f"[抓取] 接触检测超时（vel={vel:.3f}, torq={torq:.3f}），继续提升")
+                elif now >= self._deadline:
+                    print("[抓取] 接触检测超时，继续提升")
                     self._move_to(robot, self._lift, GraspState.LIFT)
 
         elif s == GraspState.LIFT:
@@ -545,14 +549,10 @@ def main():
         if has_robot:
             if robot.has_gripper:
                 try:
-                    print("[退出] 夹爪复位：张开...")
-                    robot.open_gripper()
-                    time.sleep(GRIPPER_OPEN_WAIT)
-                    print("[退出] 夹爪复位：闭合...")
-                    robot.close_gripper()
-                    time.sleep(0.5)
+                    print("[退出] 夹爪回零...")
+                    robot.release_gripper()
                 except Exception as e:
-                    print(f"[退出] 夹爪复位失败: {e}")
+                    print(f"[退出] 夹爪回零失败: {e}")
             try:
                 robot.disconnect()
             except Exception:

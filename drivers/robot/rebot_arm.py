@@ -2,20 +2,29 @@
 cameraws.drivers.robot.rebot_arm
 =================================
 轻量包装层，将 reBotArm_control_py 的低层 API 封装为
-相机感知系统需要的简洁接口：
+相机感知系统需要的简洁接口，并内置夹爪力控状态机。
 
-    connect()         — 使能电机
-    disconnect()      — 失能并关闭
-    get_tcp_pose()    — 通过 FK 读取末端位姿 (4×4 T_gripper2base)
-    move_to(x,y,z)    — 通过 IK + 轨迹控制器移动末端
-    safe_home()       — 回零位
+    connect()              — 使能电机
+    disconnect()           — 失能并关闭
+    get_tcp_pose()         — 通过 FK 读取末端位姿 (4×4 T_gripper2base)
+    move_to(x,y,z)         — 通过 IK + 轨迹控制器移动末端
+    safe_home()            — 回零位
 
-依赖：~/seeed/reBotArm_control_py（pip install -e .）
+    init_gripper()         — 注册夹爪电机（共用 CAN 总线）
+    open_gripper(dist)     — 张开夹爪（非阻塞）
+    close_gripper()        — 纯力矩闭合（非阻塞）
+    grasp(force, timeout)  — 柔性夹取（阻塞）
+    release_gripper()      — 张开并回零（阻塞）
+    get_gripper_state()    — 读取 (pos, vel, torq)
+    set_gripper_force(f)   — 设置保持力矩
+    set_gripper_zero()     — 设置当前位置为零点
+    gripper_is_holding     — 属性：是否处于力控保持状态
 """
 
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -24,7 +33,6 @@ import numpy as np
 
 
 def _find_repo_root(hint: Optional[str] = None) -> Path:
-    """查找 reBotArm_control_py 仓库根目录。"""
     candidates = []
     if hint:
         candidates.append(Path(hint).expanduser().resolve())
@@ -41,9 +49,38 @@ def _find_repo_root(hint: Optional[str] = None) -> Path:
     )
 
 
+# ── 夹爪状态机常量 ────────────────────────────────────────────────────────────
+_G_MAX_DIST_M      = 0.09
+_G_ANGLE_OPEN      = -5.0
+_G_OPEN_SOFT_LIMIT = -4.9
+_G_ARRIVE_TOL      = 0.12
+_G_HARD_STOP_ANGLE = -0.05
+_G_TAU_MAX         = 1.5
+_G_KP_MOVE         = 5.0
+_G_KD_MOVE         = 1.0
+_G_OPEN_RATE       = 4.0
+_G_CLOSE_TORQUE    = 1.0
+_G_KD_CLOSE        = 0.5
+_G_STALL_VEL       = 0.05
+_G_STARTUP_DIST    = 0.30
+_G_KP_HOLD         = 5.0
+_G_KD_HOLD         = 1.0
+_G_DEFAULT_FORCE   = 0.30
+_G_CTRL_RATE       = 500.0
+
+
+class _GS:
+    IDLE    = 0
+    OPENING = 1
+    CLOSING = 2
+    CONTACT = 3
+    HOLDING = 4
+    HOMING  = 5
+
+
 class RebotArm:
     """
-    相机感知系统 ↔ 机械臂接口。
+    相机感知系统 ↔ 机械臂接口，内置夹爪力控状态机。
 
     Args:
         config_path: robot.yaml 路径；None = 使用仓库默认
@@ -84,21 +121,33 @@ class RebotArm:
         self._endpos_ctrl: Optional[ArmEndPos] = None
         self._ArmEndPos = ArmEndPos
 
-        self._connected    = False
-        self._gripper_mot  = None  # 夹爪电机句柄，由 init_gripper() 注册
-        self._gripper_kp   = 5.0   # MIT kp，从 gripper.yaml 加载
-        self._gripper_kd   = 1.0   # MIT kd，从 gripper.yaml 加载
-        self._gripper_ctrl = None  # 共用的 Controller 引用
+        self._connected = False
 
-    # ── 生命周期 ─────────────────────────────────────────────────────────────
+        # 夹爪电机（注册到机械臂已有的 CAN 总线）
+        self._gripper_mot  = None
+        self._gripper_kp   = _G_KP_HOLD
+        self._gripper_kd   = _G_KD_HOLD
+        self._gripper_ctrl = None
+
+        # 夹爪状态机
+        self._g_state            = _GS.IDLE
+        self._g_lock             = threading.Lock()
+        self._g_pos              = 0.0
+        self._g_vel              = 0.0
+        self._g_torq             = 0.0
+        self._g_pos_start        = 0.0
+        self._g_q_contact        = 0.0
+        self._g_contact_elapsed  = 0.0
+        self._g_open_q_des       = _G_OPEN_SOFT_LIMIT
+        self._g_open_target      = _G_OPEN_SOFT_LIMIT
+        self._g_target_force     = _G_DEFAULT_FORCE
+        self._g_loop_thread: Optional[threading.Thread] = None
+        self._g_loop_running     = False
+        self._g_loop_stop        = threading.Event()
+
+    # ── 生命周期 ──────────────────────────────────────────────────────────────
 
     def connect(self, enable: bool = True) -> None:
-        """连接机械臂。
-
-        Args:
-            enable: True = 使能电机（运动控制用）
-                    False = 仅读取编码器，电机保持失能（只读模式）
-        """
         self._arm.connect()
         if enable:
             self._arm.enable()
@@ -112,19 +161,13 @@ class RebotArm:
         self._connected = True
 
     def disconnect(self) -> None:
-        """停止控制器，失能电机，关闭连接。"""
+        self._g_stop_loop()
         if self._endpos_ctrl is not None:
             try:
                 self._endpos_ctrl.end()
             except Exception:
                 pass
             self._endpos_ctrl = None
-        if self._gripper is not None:
-            try:
-                self._gripper.disconnect()
-            except Exception:
-                pass
-            self._gripper = None
         try:
             self._arm.disconnect()
         except Exception:
@@ -132,23 +175,10 @@ class RebotArm:
         self._connected = False
         print("[RebotArm] 已断开连接")
 
-    # ── 夹爪 ─────────────────────────────────────────────────────────────────
-    # 夹爪电机直接注册到机械臂已有的 CAN Controller，共用同一条总线，
-    # 不再实例化独立的 Gripper 类，避免同端口双重连接冲突。
-
-    # 夹爪物理参数
-    _GRIPPER_MAX_DIST_M = 0.09   # 最大开合距离 (m)
-    _GRIPPER_ANGLE_OPEN = -5.0   # 完全张开对应电机角度 (rad)
-    # 映射：0 rad = 闭合(0 cm)，-5 rad = 完全张开(9 cm)
+    # ── 夹爪初始化 ────────────────────────────────────────────────────────────
 
     def init_gripper(self, cfg_path: Optional[str] = None) -> None:
-        """将夹爪电机注册到机械臂已有的 CAN 总线控制器。
-
-        夹爪和机械臂共用同一个 Controller 实例，不另开串口连接。
-
-        Args:
-            cfg_path: gripper.yaml 路径；None = 使用 reBotArm_control_py/config/gripper.yaml
-        """
+        """将夹爪电机注册到机械臂已有的 CAN 总线，并启动力控状态机。"""
         from reBotArm_control_py.actuator.gripper import load_cfg as load_gripper_cfg
         from motorbridge import Mode, CallError
 
@@ -159,36 +189,53 @@ class RebotArm:
         gcfg = load_gripper_cfg(cfg_path)
         gc = gcfg["gripper"]
 
-        # 复用机械臂已有的 Controller（同 vendor 则共用，否则报错）
         vendor = gc.vendor
         if vendor not in self._arm._ctrl_map:
             raise RuntimeError(
-                f"夹爪 vendor={vendor!r} 与机械臂 vendor 不同，"
-                "无法共用 Controller，请确认配置文件"
+                f"夹爪 vendor={vendor!r} 与机械臂 vendor 不同，无法共用 Controller"
             )
         ctrl = self._arm._ctrl_map[vendor]
 
-        # 注册夹爪电机到已有控制器
         if vendor == "damiao":
-            self._gripper_mot = ctrl.add_damiao_motor(
-                gc.motor_id, gc.feedback_id, gc.model
-            )
+            self._gripper_mot = ctrl.add_damiao_motor(gc.motor_id, gc.feedback_id, gc.model)
         elif vendor == "myactuator":
-            self._gripper_mot = ctrl.add_myactuator_motor(
-                gc.motor_id, gc.feedback_id, gc.model
-            )
+            self._gripper_mot = ctrl.add_myactuator_motor(gc.motor_id, gc.feedback_id, gc.model)
         elif vendor == "robstride":
-            self._gripper_mot = ctrl.add_robstride_motor(
-                gc.motor_id, gc.feedback_id, gc.model
-            )
+            self._gripper_mot = ctrl.add_robstride_motor(gc.motor_id, gc.feedback_id, gc.model)
         else:
             raise ValueError(f"不支持的夹爪 vendor: {vendor!r}")
 
-        self._gripper_kp   = gc.kp   # ← gripper.yaml MIT.kp
-        self._gripper_kd   = gc.kd   # ← gripper.yaml MIT.kd
-        self._gripper_ctrl = ctrl    # 保存引用，用于 poll
+        self._gripper_kp   = gc.kp
+        self._gripper_kd   = gc.kd
+        self._gripper_ctrl = ctrl
 
-        # 使能并切换 MIT 模式
+        # 用同一把 RLock 串行化机械臂循环与夹爪循环的所有总线操作
+        if not hasattr(ctrl, '_bus_lock'):
+            ctrl._bus_lock = threading.RLock()
+        lock = ctrl._bus_lock
+
+        def _wrap(fn, _lock=lock):
+            def _locked(*a, **kw):
+                with _lock:
+                    return fn(*a, **kw)
+            return _locked
+
+        # 锁住 Controller 的读操作（所有调用方共用同一实例，只需打一次补丁）
+        if not hasattr(ctrl, '_bus_lock_patched'):
+            ctrl.poll_feedback_once = _wrap(ctrl.poll_feedback_once)
+            ctrl._bus_lock_patched = True
+
+        # 逐电机锁住写操作：每次只锁单关节 send_pos_vel（~0.5ms），
+        # 避免 pos_vel 一次锁住全部 6 关节（~3ms）饿死 500Hz 夹爪循环。
+        # _request_and_poll 通过已锁的 poll_feedback_once 间接串行化。
+        if not hasattr(self._arm, '_bus_lock_patched'):
+            for jc in self._arm._joints:
+                mot = self._arm._motor_map[jc.name]
+                for _mattr in ('send_pos_vel', 'send_mit', 'request_feedback'):
+                    if hasattr(mot, _mattr):
+                        setattr(mot, _mattr, _wrap(getattr(mot, _mattr)))
+            self._arm._bus_lock_patched = True
+
         try:
             ctrl.enable_all()
             time.sleep(0.3)
@@ -199,123 +246,260 @@ class RebotArm:
         except CallError as e:
             raise RuntimeError(f"夹爪 MIT 模式切换失败: {e}") from e
 
-        print("[RebotArm] 夹爪已注册到 CAN 总线 (MIT)")
+        self._g_start_loop()
+        print("[RebotArm] 夹爪已注册到 CAN 总线，力控状态机已启动")
 
     @property
     def has_gripper(self) -> bool:
         return self._gripper_mot is not None
 
-    def set_gripper_opening(self, distance_m: float) -> None:
-        """按开合距离控制夹爪（MIT 模式，非阻塞）。
+    @property
+    def gripper_is_holding(self) -> bool:
+        with self._g_lock:
+            return self._g_state == _GS.HOLDING
 
-        Args:
-            distance_m: 开合距离（米），0.0 = 完全夹紧，0.09 = 完全张开
-        """
-        if self._gripper_mot is None:
-            return
-        d = float(np.clip(distance_m, 0.0, self._GRIPPER_MAX_DIST_M))
-        angle = (d / self._GRIPPER_MAX_DIST_M) * self._GRIPPER_ANGLE_OPEN
+    # ── 夹爪状态机内部 ────────────────────────────────────────────────────────
+
+    def _g_safe_mit(self, pos: float, vel: float, kp: float, kd: float, tau_ff: float = 0.0) -> None:
+        pos_cmd  = float(np.clip(pos, _G_OPEN_SOFT_LIMIT, 0.0))
+        pos_term = kp * (pos_cmd - self._g_pos) + kd * (-self._g_vel)
+        tau_safe = float(np.clip(pos_term + tau_ff, -_G_TAU_MAX, _G_TAU_MAX)) - pos_term
+        lock = getattr(self._gripper_ctrl, '_bus_lock', None)
         try:
-            self._gripper_mot.send_mit(
-                float(angle), 0.0,
-                float(self._gripper_kp), float(self._gripper_kd), 0.0,
-            )
-            self._gripper_mot.request_feedback()
-            self._gripper_ctrl.poll_feedback_once()
-        except Exception as e:
-            print(f"[RebotArm] 夹爪指令发送失败: {e}")
-
-    def open_gripper(self, distance_m: float = 0.09) -> None:
-        """张开夹爪（非阻塞）。
-
-        Args:
-            distance_m: 张开距离（米），默认完全张开 0.09 m
-        """
-        self.set_gripper_opening(distance_m)
-
-    def close_gripper(self) -> None:
-        """夹紧夹爪（非阻塞）。"""
-        self.set_gripper_opening(0.0)
-
-    def get_gripper_state(self) -> tuple:
-        """读取夹爪电机状态。
-
-        Returns:
-            (pos_rad, vel_rad_s, torq_nm)，未初始化时返回 (0.0, 0.0, 0.0)。
-        """
-        if self._gripper_mot is None:
-            return (0.0, 0.0, 0.0)
-        try:
-            self._gripper_mot.request_feedback()
-            self._gripper_ctrl.poll_feedback_once()
-            st = self._gripper_mot.get_state()
-            if st is not None:
-                return (float(st.pos), float(st.vel), float(st.torq))
+            if lock:
+                with lock:
+                    self._gripper_mot.send_mit(pos_cmd, vel, kp, kd, tau_safe)
+                    self._gripper_mot.request_feedback()
+                    self._gripper_ctrl.poll_feedback_once()
+            else:
+                self._gripper_mot.send_mit(pos_cmd, vel, kp, kd, tau_safe)
+                self._gripper_mot.request_feedback()
+                self._gripper_ctrl.poll_feedback_once()
         except Exception:
             pass
-        return (0.0, 0.0, 0.0)
 
-    def hold_gripper_with_torque(self, target_torque_nm: float) -> None:
-        """接触后施加前馈扭矩，将夹取力标准化为 target_torque_nm。
+    def _g_tick(self, dt: float) -> None:
+        try:
+            st = self._gripper_mot.get_state()
+            if st is not None:
+                self._g_pos  = float(st.pos)
+                self._g_vel  = float(st.vel)
+                self._g_torq = float(st.torq)
+        except Exception:
+            pass
 
-        原理：MIT 总输出 = kp*(q_des - q_actual) + tau_ff
-             令总输出 = target_torque_nm，解得 tau_ff：
-             tau_ff = target_torque_nm - kp*(0 - q_contact)
-                    = target_torque_nm + kp*q_contact   （q_contact < 0）
+        pos = self._g_pos
+        vel = self._g_vel
 
-        Args:
-            target_torque_nm: 目标夹取力矩（Nm），根据应用场景调整
-        """
+        with self._g_lock:
+            s  = self._g_state
+            tf = self._g_target_force
+
+        if s == _GS.OPENING:
+            with self._g_lock:
+                target = self._g_open_target
+                self._g_open_q_des = max(self._g_open_q_des - _G_OPEN_RATE * dt, target)
+                q = self._g_open_q_des
+            self._g_safe_mit(q, 0.0, _G_KP_MOVE, _G_KD_MOVE)
+            if abs(pos - target) < _G_ARRIVE_TOL:
+                with self._g_lock:
+                    self._g_state = _GS.IDLE
+
+        elif s == _GS.CLOSING:
+            self._g_safe_mit(0.0, 0.0, 0.0, _G_KD_CLOSE, _G_CLOSE_TORQUE)
+            with self._g_lock:
+                ps = self._g_pos_start
+            if abs(pos - ps) >= _G_STARTUP_DIST:
+                if pos > _G_HARD_STOP_ANGLE:
+                    with self._g_lock:
+                        self._g_state = _GS.IDLE
+                elif abs(vel) < _G_STALL_VEL:
+                    with self._g_lock:
+                        self._g_q_contact       = pos
+                        self._g_contact_elapsed = 0.0
+                        self._g_state           = _GS.CONTACT
+
+        elif s == _GS.CONTACT:
+            with self._g_lock:
+                qc = self._g_q_contact
+            self._g_safe_mit(qc, 0.0, _G_KP_HOLD, _G_KD_HOLD)
+            with self._g_lock:
+                self._g_contact_elapsed += dt
+                if self._g_contact_elapsed >= 0.02:
+                    self._g_state = _GS.HOLDING
+
+        elif s == _GS.HOLDING:
+            with self._g_lock:
+                qc = self._g_q_contact
+            self._g_safe_mit(qc, 0.0, _G_KP_HOLD, _G_KD_HOLD, tf)
+
+        elif s == _GS.HOMING:
+            self._g_safe_mit(0.0, 0.0, _G_KP_MOVE, _G_KD_MOVE)
+            if abs(pos) < _G_ARRIVE_TOL:
+                with self._g_lock:
+                    self._g_state = _GS.IDLE
+
+    def _g_ctrl_loop(self) -> None:
+        dt = 1.0 / _G_CTRL_RATE
+        last = time.perf_counter()
+        while not self._g_loop_stop.is_set():
+            now = time.perf_counter()
+            elapsed = now - last
+            if elapsed >= dt:
+                last += dt
+                self._g_tick(elapsed)
+            else:
+                time.sleep(1e-4)
+
+    def _g_start_loop(self) -> None:
+        if self._g_loop_running:
+            return
+        self._g_loop_stop.clear()
+        self._g_loop_thread = threading.Thread(target=self._g_ctrl_loop, daemon=True)
+        self._g_loop_thread.start()
+        self._g_loop_running = True
+
+    def _g_stop_loop(self) -> None:
+        if not self._g_loop_running:
+            return
+        self._g_loop_stop.set()
+        if self._g_loop_thread is not None:
+            self._g_loop_thread.join(timeout=1.0)
+            self._g_loop_thread = None
+        self._g_loop_running = False
+        # 软停：发一帧阻尼命令，避免失能时硬件卡顿
+        if self._gripper_mot is not None:
+            try:
+                self._gripper_mot.send_mit(self._g_pos, 0.0, 0.0, _G_KD_MOVE, 0.0)
+                self._gripper_mot.request_feedback()
+                self._gripper_ctrl.poll_feedback_once()
+            except Exception:
+                pass
+
+    def _g_wait_idle(self, timeout: float = 3.0) -> bool:
+        t_end = time.monotonic() + timeout
+        while time.monotonic() < t_end:
+            with self._g_lock:
+                if self._g_state == _GS.IDLE:
+                    return True
+            time.sleep(0.01)
+        return False
+
+    # ── 夹爪公开接口 ──────────────────────────────────────────────────────────
+
+    def open_gripper(self, distance_m: float = _G_MAX_DIST_M) -> None:
+        """张开夹爪（阻塞，等待到位，最多 3s）。"""
         if self._gripper_mot is None:
             return
-        try:
-            self._gripper_mot.request_feedback()
-            self._gripper_ctrl.poll_feedback_once()
-            st = self._gripper_mot.get_state()
-            if st is None:
-                return
-            q_contact = float(st.pos)
-            tau_ff = target_torque_nm - self._gripper_kp * (0.0 - q_contact)
-            self._gripper_mot.send_mit(
-                0.0, 0.0,
-                float(self._gripper_kp), float(self._gripper_kd),
-                float(tau_ff),
-            )
-            self._gripper_mot.request_feedback()
-            self._gripper_ctrl.poll_feedback_once()
-        except Exception as e:
-            print(f"[RebotArm] 夹爪前馈控制失败: {e}")
+        d = float(np.clip(distance_m, 0.0, _G_MAX_DIST_M))
+        target = max((d / _G_MAX_DIST_M) * _G_ANGLE_OPEN, _G_OPEN_SOFT_LIMIT)
+        with self._g_lock:
+            self._g_open_target = target
+            self._g_open_q_des  = self._g_pos
+            self._g_state = _GS.OPENING
+        self._g_wait_idle(3.0)
 
-    # ── 状态读取 ─────────────────────────────────────────────────────────────
+    def close_gripper(self) -> None:
+        """纯力矩闭合（非阻塞）。"""
+        if self._gripper_mot is None:
+            return
+        with self._g_lock:
+            self._g_pos_start = self._g_pos
+            self._g_state = _GS.CLOSING
 
-    def get_tcp_pose(self) -> np.ndarray:
-        """通过正运动学读取当前末端位姿。
+    def grasp(self, force: Optional[float] = None, timeout: float = 5.0) -> bool:
+        """柔性夹取：闭合 → 接触检测 → 力控保持（阻塞）。
 
         Returns:
-            T_gripper2base: (4, 4) 齐次变换矩阵
+            True = 成功夹取（HOLDING），False = 空夹取或超时
         """
+        if self._gripper_mot is None:
+            return False
+        if force is not None:
+            with self._g_lock:
+                self._g_target_force = float(np.clip(force, 0.05, _G_TAU_MAX))
+        with self._g_lock:
+            self._g_pos_start = self._g_pos
+            self._g_state = _GS.CLOSING
+        t_end = time.monotonic() + timeout
+        while time.monotonic() < t_end:
+            with self._g_lock:
+                s = self._g_state
+            if s == _GS.HOLDING:
+                return True
+            if s == _GS.IDLE:
+                return False
+            time.sleep(0.01)
+        with self._g_lock:
+            self._g_state = _GS.IDLE
+        return False
+
+    def release_gripper(self, timeout: float = 4.0) -> None:
+        """张开夹爪并回零（阻塞）。"""
+        if self._gripper_mot is None:
+            return
+        with self._g_lock:
+            self._g_open_q_des = self._g_pos
+            self._g_state = _GS.OPENING
+        self._g_wait_idle(2.0)
+        with self._g_lock:
+            self._g_state = _GS.HOMING
+        self._g_wait_idle(timeout)
+
+    def get_gripper_state(self) -> tuple:
+        """返回 (pos_rad, vel_rad_s, torq_nm)。"""
+        return (self._g_pos, self._g_vel, self._g_torq)
+
+    def set_gripper_force(self, force: float) -> None:
+        """设置力控保持力矩 (Nm)。"""
+        with self._g_lock:
+            self._g_target_force = float(np.clip(force, 0.05, _G_TAU_MAX))
+
+    @property
+    def gripper_force(self) -> float:
+        """当前目标夹取力矩 (Nm)。"""
+        with self._g_lock:
+            return self._g_target_force
+
+    def set_gripper_zero(self) -> bool:
+        """设置当前位置为零点（会暂停控制循环）。"""
+        if self._gripper_mot is None:
+            return False
+        self._g_stop_loop()
+        from motorbridge import CallError
+        try:
+            self._gripper_mot.set_zero_position()
+            print("[RebotArm] 夹爪零点已设置")
+            ok = True
+        except CallError as e:
+            print(f"[RebotArm] 夹爪零点设置失败: {e}")
+            ok = False
+        if ok:
+            self._g_start_loop()
+            with self._g_lock:
+                self._g_state = _GS.IDLE
+        return ok
+
+    # ── 状态读取 ──────────────────────────────────────────────────────────────
+
+    def get_tcp_pose(self) -> np.ndarray:
+        """通过正运动学读取当前末端位姿，返回 (4, 4) 齐次变换矩阵。"""
         self._arm._request_and_poll()
         q, _, _ = self._arm.get_state()
         position, rotation, _ = self._compute_fk(self._model, q)
-
         T = np.eye(4, dtype=np.float64)
         T[:3, :3] = rotation
         T[:3,  3] = position
         return T
 
-    # ── 运动控制 ─────────────────────────────────────────────────────────────
+    # ── 运动控制 ──────────────────────────────────────────────────────────────
 
     def move_to(
         self,
-        x: float,
-        y: float,
-        z: float,
-        roll: float = 0.0,
-        pitch: float = 0.0,
-        yaw: float = 0.0,
+        x: float, y: float, z: float,
+        roll: float = 0.0, pitch: float = 0.0, yaw: float = 0.0,
         duration: float = 2.0,
     ) -> bool:
-        """通过 IK + 轨迹规划将末端移动到目标位置。"""
         if self._endpos_ctrl is None:
             raise RuntimeError("未连接机械臂，请先调用 connect()")
         return bool(self._endpos_ctrl.move_to_traj(
@@ -326,22 +510,13 @@ class RebotArm:
         """回零位（关节全部归零）。"""
         if self._endpos_ctrl is None:
             raise RuntimeError("未连接机械臂，请先调用 connect()")
-        q_zero = np.zeros(self._arm.num_joints, dtype=np.float64)
-        pos_zero, _, _ = self._compute_fk(self._model, q_zero)
-        ok = self._endpos_ctrl.move_to_traj(
-            x=float(pos_zero[0]), y=float(pos_zero[1]), z=float(pos_zero[2]),
-            duration=duration,
-        )
-        if not ok:
-            self._arm.mode_pos_vel()
-            self._arm.pos_vel(q_zero)
-            time.sleep(duration)
+        self._endpos_ctrl.safe_home()
 
-    # ── 上下文管理器 ─────────────────────────────────────────────────────────
+    # ── 上下文管理器 ──────────────────────────────────────────────────────────
 
     def __enter__(self) -> "RebotArm":
         self.connect()
         return self
 
-    def __exit__(self, *args) -> None:
+    def __exit__(self, *_) -> None:
         self.disconnect()

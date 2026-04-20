@@ -72,7 +72,7 @@ yolo:
   # - "yolov8s-world.pt"   : 经典开放词汇检测
   # - "yolo11n.pt"         : 经典高精度 80 类检测
   # ==========================================
-  model_name: "yolov8s-world.pt" 
+  model_name: "yoloe-26l-seg.pt"  
   
   # "cpu" 或 "cuda:0"
   device: "cpu"
@@ -83,4 +83,61 @@ yolo:
   custom_classes:
     - "yellow banana"
     - "water bottle"
-    - "coffee cup"
+    - "light blue coffee cup"
+    - "cup"
+    - "green cube"
+    - "red cube"
+
+grasp_pipeline:
+  backend: geometric_topdown
+  infer_every_live: 3
+  min_depth_m: 0.05
+  max_depth_m: 1.20
+  min_points: 120
+  voxel_size_m: 0.003
+  outlier_nb_neighbors: 20
+  outlier_std_ratio: 2.0
+
+  support_plane:
+    plane_refresh_frames: 15
+    distance_threshold_m: 0.008
+    ransac_n: 3
+    num_iterations: 120
+    object_clearance_m: 0.006
+
+  grasp:
+    max_width_m: 0.085
+    width_percentile_low: 5
+    width_percentile_high: 95
+    extent_percentile_low: 10
+    extent_percentile_high: 90
+    pregrasp_offset_m: 0.080
+    grasp_height_ratio: 0.50
+    min_height_above_plane_m: 0.012
+    candidates_per_object: 2
+    allow_minor_axis_grasp: true
+    preferred_axis: camera_x
+    preferred_axis_target: open_axis
+    preferred_axis_weight: 0.18
+    flat_object_max_height_m: 0.045
+    flat_object_max_height_ratio: 0.30
+    tall_object_min_height_m: 0.070
+    tall_object_min_height_ratio: 0.60
+    flat_grasp_height_ratio: 0.82
+    tall_grasp_height_ratio: 0.55
+    profile_mask_erode_px: 3
+    flat_image_aspect_ratio: 0.78
+    tall_image_aspect_ratio: 1.15
+    elongated_planar_aspect_ratio: 1.80
+    prefer_base_down_for_flat: true
+    prefer_base_down_profiles: [flat, compact, tall]
+    base_down_max_tilt_deg: 35.0
+    min_contact_clearance_m: 0.024
+    low_profile_reject_height_m: 0.018
+    low_profile_min_contact_clearance_m: 0.024
+    collision_penalty_weight: 0.22
+
+  output:
+    save_dir: data/grasp_snapshots
+    snapshot_open3d: true
+    live_top_k: 3
