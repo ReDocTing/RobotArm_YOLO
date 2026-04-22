@@ -1,4 +1,4 @@
-# 🦾 cameraws — 机械臂视觉抓取 Demo
+# 🦾 reBot Arm B601-DM 视觉夹取 Demo
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Seeed-Projects/reBot-DevArm/main/media/v1.0.png" alt="reBot Arm B601">
@@ -29,7 +29,7 @@
 
 ## 📖 项目介绍
 
-**cameraws** 是基于 [reBot Arm B601](https://github.com/vectorBH6/reBotArm_control_py) 机械臂控制库与奥比中光 **Gemini 2** 深度相机的视觉抓取算法演示项目。系统通过 YOLO 模型实时识别桌面物体，利用 OBB 最小外接矩形估计夹取姿态，经手眼标定将相机坐标系下的抓取点变换到机械臂基坐标系，最终驱动机械臂完成自主抓取。
+**reBot Arm B601-DM 视觉夹取 Demo** 是基于 [reBot Arm B601](https://github.com/vectorBH6/reBotArm_control_py) 机械臂控制库与奥比中光 **Gemini 2** 深度相机的视觉抓取算法演示项目。系统通过 YOLO 模型实时识别桌面物体，利用 OBB 最小外接矩形估计夹取姿态，经手眼标定将相机坐标系下的抓取点变换到机械臂基坐标系，最终驱动机械臂完成自主抓取。
 
 ### ✨ 核心功能
 
@@ -68,16 +68,15 @@ sudo chmod 666 /dev/ttyUSB0        # USB2CAN（端口号按实际调整）
 ### Step 1. 克隆仓库
 
 ```bash
-git clone https://github.com/EclipseaHime017/SeeedStudioTargetDetection.git
-cd cameraws
-git submodule update --init --recursive
+git clone https://github.com/Seeed-Projects/reBot-DevArm-Grasp.git rebot_grasp
+cd rebot_grasp
 ```
 
 ### Step 2. 创建 conda 环境
 
 ```bash
-conda create -n cameraws python=3.10 -y
-conda activate cameraws
+conda create -n rebotarm python=3.10 -y
+conda activate rebotarm
 ```
 
 ### Step 3. 安装 Python 依赖
@@ -111,30 +110,30 @@ motorbridge>=0.1.7
 git clone https://github.com/vectorBH6/reBotArm_control_py.git sdk/reBotArm_control_py
 cd sdk/reBotArm_control_py
 pip install -e .
+cd ../..
 ```
 
 ### Step 5. 安装 Orbbec SDK（pyorbbecsdk）
 
-本项目使用 **pyorbbecsdk**（Orbbec SDK v2 的 Python 封装），已作为 git submodule 包含在 `sdk/pyorbbecsdk/` 目录下。
+本项目依赖 **pyorbbecsdk**（Orbbec SDK v2 的 Python 封装），但仓库默认不包含 `sdk/pyorbbecsdk`。请先进入 `sdk/` 目录自行拉取官方仓库。
 
-**方式一：从 submodule 编译安装（推荐）**
+**方式一：从 GitHub 获取（推荐）**
 
 ```bash
 # 安装编译依赖
 sudo apt-get install -y cmake build-essential libusb-1.0-0-dev
 
-cd sdk/pyorbbecsdk
+cd sdk
+git clone https://github.com/orbbec/pyorbbecsdk.git
+cd pyorbbecsdk
 pip install -e .
 ```
 
-**方式二：从 GitHub 安装**
+**方式二：从 Gitee 获取**
 
 ```bash
-# GitHub
-git clone https://github.com/orbbec/pyorbbecsdk.git
-# Gitee（国内镜像）
+cd sdk
 git clone https://gitee.com/orbbecdeveloper/pyorbbecsdk.git
-
 cd pyorbbecsdk
 pip install -e .
 ```
@@ -148,7 +147,8 @@ python -c "import pyorbbecsdk; print('pyorbbecsdk OK')"
 **配置 udev 规则（首次使用必须）**
 
 ```bash
-sudo bash sdk/pyorbbecsdk/scripts/install_udev_rules.sh
+cd sdk/pyorbbecsdk
+sudo bash scripts/install_udev_rules.sh
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
@@ -176,7 +176,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 ## 📁 目录结构
 
 ```
-cameraws/
+rebot_grasp/
 ├── config/
 │   ├── default.yaml              # 主配置文件
 │   └── calibration/
@@ -202,7 +202,7 @@ cameraws/
 │   ├── object_detection.py
 │   └── collect_handeye_eih.py
 ├── sdk/
-│   ├── pyorbbecsdk/              # Orbbec SDK Python 封装（submodule）
+│   ├── pyorbbecsdk/              # Orbbec SDK Python 封装
 │   └── reBotArm_control_py/      # reBot Arm SDK
 └── requirements.txt
 ```
@@ -246,7 +246,15 @@ yolo:
 python scripts/collect_handeye_eih.py
 ```
 
-机械臂会自动遍历 50 个预设位姿，检测到 ArUco 稳定后自动采样。正常结束或中途打断时，脚本都会尝试计算并保存标定结果；至少需要 5 个样本，建议 ≥15 个样本以获得更稳的结果。
+自动模式下，机械臂会自动遍历 50 个预设位姿，检测到 ArUco 稳定后自动采样。正常结束或中途打断时，脚本都会尝试计算并保存标定结果；至少需要 5 个样本，建议 ≥15 个样本以获得更稳的结果。
+
+如需手动推动机械臂采集，可使用：
+
+```bash
+python scripts/collect_handeye_eih.py --manual
+```
+
+手动模式下，机械臂会进入重力补偿状态。将末端推到合适视角后按 `Enter` 采集，按 `c` 或 `q` 结束并计算。
 
 ---
 
@@ -272,7 +280,7 @@ python scripts/collect_handeye_eih.py
 
 ### `scripts/collect_handeye_eih.py` — 手眼标定数据采集
 
-Eye-in-Hand 模式手眼标定，使用 ArUco 标记，支持 TSAI / PARK / HORAUD 三种求解方法。
+Eye-in-Hand 模式手眼标定，支持自动遍历采样和手动重力补偿采样，使用 ArUco 标记，支持 TSAI / PARK / HORAUD 三种求解方法。
 
 ---
 
@@ -289,7 +297,7 @@ Eye-in-Hand 模式手眼标定，使用 ArUco 标记，支持 TSAI / PARK / HORA
 
 ## ☎ 联系我们
 
-- **技术支持**：[提交 Issue](https://github.com/EclipseaHime017/SeeedStudioTargetDetection/issues)
+- **技术支持**：[提交 Issue](https://github.com/Seeed-Projects/reBot-DevArm-Grasp/issues)
 
 ---
 

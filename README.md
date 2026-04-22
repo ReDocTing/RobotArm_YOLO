@@ -1,4 +1,4 @@
-# 🦾 cameraws — Robotic Arm Vision Grasping Demo
+# 🦾 reBot Arm B601-DM Visual Grasping Demo
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Seeed-Projects/reBot-DevArm/main/media/v1.0.png" alt="reBot Arm B601">
@@ -29,7 +29,7 @@
 
 ## 📖 Introduction
 
-**cameraws** is a vision-based grasping demo that integrates the [reBot Arm B601](https://github.com/vectorBH6/reBotArm_control_py) robotic arm control library with the **Orbbec Gemini 2** depth camera. The system uses a YOLO model to detect tabletop objects in real time, estimates grasp poses via OBB minimum bounding rectangles, transforms grasp points from camera space to robot base space through hand-eye calibration, and drives the arm to perform autonomous grasping.
+**reBot Arm B601-DM Visual Grasping Demo** is a vision-based grasping demo that integrates the [reBot Arm B601](https://github.com/vectorBH6/reBotArm_control_py) robotic arm control library with the **Orbbec Gemini 2** depth camera. The system uses a YOLO model to detect tabletop objects in real time, estimates grasp poses via OBB minimum bounding rectangles, transforms grasp points from camera space to robot base space through hand-eye calibration, and drives the arm to perform autonomous grasping.
 
 ### ✨ Core Features
 
@@ -68,16 +68,15 @@ sudo chmod 666 /dev/ttyUSB0        # USB2CAN (adjust port as needed)
 ### Step 1. Clone the repository
 
 ```bash
-git clone https://github.com/EclipseaHime017/SeeedStudioTargetDetection.git
-cd cameraws
-git submodule update --init --recursive
+git clone https://github.com/Seeed-Projects/reBot-DevArm-Grasp.git rebot_grasp
+cd rebot_grasp
 ```
 
 ### Step 2. Create a conda environment
 
 ```bash
-conda create -n cameraws python=3.10 -y
-conda activate cameraws
+conda create -n rebotarm python=3.10 -y
+conda activate rebotarm
 ```
 
 ### Step 3. Install Python dependencies
@@ -111,30 +110,30 @@ motorbridge>=0.1.7
 git clone https://github.com/vectorBH6/reBotArm_control_py.git sdk/reBotArm_control_py
 cd sdk/reBotArm_control_py
 pip install -e .
+cd ../..
 ```
 
 ### Step 5. Install the Orbbec SDK (pyorbbecsdk)
 
-This project uses **pyorbbecsdk** — the Python wrapper for Orbbec SDK v2. It is included as a git submodule under `sdk/pyorbbecsdk/`.
+This project depends on **pyorbbecsdk** — the Python wrapper for Orbbec SDK v2 — but the repository does not bundle `sdk/pyorbbecsdk` by default. Please clone it yourself under `sdk/` first.
 
-**Option 1: Build from submodule (recommended)**
+**Option 1: Get it from GitHub (recommended)**
 
 ```bash
 # Install build dependencies
 sudo apt-get install -y cmake build-essential libusb-1.0-0-dev
 
-cd sdk/pyorbbecsdk
+cd sdk
+git clone https://github.com/orbbec/pyorbbecsdk.git
+cd pyorbbecsdk
 pip install -e .
 ```
 
-**Option 2: Install from GitHub**
+**Option 2: Get it from Gitee**
 
 ```bash
-# GitHub
-git clone https://github.com/orbbec/pyorbbecsdk.git
-# Gitee (China mirror)
+cd sdk
 git clone https://gitee.com/orbbecdeveloper/pyorbbecsdk.git
-
 cd pyorbbecsdk
 pip install -e .
 ```
@@ -148,7 +147,8 @@ python -c "import pyorbbecsdk; print('pyorbbecsdk OK')"
 **Configure udev rules (required on first use)**
 
 ```bash
-sudo bash sdk/pyorbbecsdk/scripts/install_udev_rules.sh
+cd sdk/pyorbbecsdk
+sudo bash scripts/install_udev_rules.sh
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
@@ -176,7 +176,7 @@ Download the prebuilt package and run `OrbbecViewer` to confirm the camera conne
 ## 📁 Directory Structure
 
 ```
-cameraws/
+rebot_grasp/
 ├── config/
 │   ├── default.yaml              # Main configuration
 │   └── calibration/
@@ -202,7 +202,7 @@ cameraws/
 │   ├── object_detection.py
 │   └── collect_handeye_eih.py
 ├── sdk/
-│   ├── pyorbbecsdk/              # Orbbec SDK Python wrapper (submodule)
+│   ├── pyorbbecsdk/              # Orbbec SDK Python wrapper
 │   └── reBotArm_control_py/      # reBot Arm SDK
 └── requirements.txt
 ```
@@ -246,7 +246,15 @@ yolo:
 python scripts/collect_handeye_eih.py
 ```
 
-The arm will automatically traverse 50 preset poses and record a sample whenever the ArUco marker is detected stably. If the run finishes normally or is interrupted midway, the script will still attempt to compute and save the calibration result; at least 5 samples are required, and 15 or more are recommended.
+In automatic mode, the arm traverses 50 preset poses and records a sample whenever the ArUco marker is detected stably. If the run finishes normally or is interrupted midway, the script still attempts to compute and save the calibration result; at least 5 samples are required, and 15 or more are recommended.
+
+If you want to move the arm by hand during calibration, use:
+
+```bash
+python scripts/collect_handeye_eih.py --manual
+```
+
+In manual mode, the arm enters gravity-compensation mode. Push the end effector to a suitable viewpoint, press `Enter` to capture, and use `c` or `q` to finish and compute the result.
 
 ---
 
@@ -272,7 +280,7 @@ Pure YOLO detection with real-time bounding boxes and confidence scores. No gras
 
 ### `scripts/collect_handeye_eih.py` — Hand-eye calibration data collection
 
-Eye-in-Hand hand-eye calibration using ArUco markers. Supports TSAI, PARK, and HORAUD solvers.
+Eye-in-Hand hand-eye calibration using ArUco markers, with both automatic pose traversal and manual gravity-compensation sampling. Supports TSAI, PARK, and HORAUD solvers.
 
 ---
 
@@ -289,7 +297,7 @@ Eye-in-Hand hand-eye calibration using ArUco markers. Supports TSAI, PARK, and H
 
 ## ☎ Contact Us
 
-- **Technical Support**: [Submit an Issue](https://github.com/EclipseaHime017/SeeedStudioTargetDetection/issues)
+- **Technical Support**: [Submit an Issue](https://github.com/Seeed-Projects/reBot-DevArm-Grasp/issues)
 
 ---
 

@@ -28,7 +28,7 @@ robot:
     y: 0.0
     z: 0.3
     roll: 0.0
-    pitch: 1.0
+    pitch: 0.7
     duration: 3.0
 
 yolo:
@@ -42,6 +42,7 @@ yolo:
     - "cup"
     - "green object"
     - "red object"
+    - "tool"
 
 grasp_pipeline:
   infer_every_live: 3
