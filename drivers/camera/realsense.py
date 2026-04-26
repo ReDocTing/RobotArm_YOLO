@@ -61,9 +61,13 @@ class RealsenseCamera(CameraDriver):
 
         # 内参
         intr = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+        cx = getattr(intr, "ppx", getattr(intr, "cx", None))
+        cy = getattr(intr, "ppy", getattr(intr, "cy", None))
+        if cx is None or cy is None:
+            raise RuntimeError(f"无法读取 RealSense 主点参数，intrinsics={intr!r}")
         self._K = np.array([
-            [intr.fx, 0,        intr.cx],
-            [0,        intr.fy, intr.cy],
+            [intr.fx, 0,        cx],
+            [0,        intr.fy, cy],
             [0,        0,       1      ],
         ], dtype=np.float64)
 
