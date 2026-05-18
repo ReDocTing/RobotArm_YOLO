@@ -1,306 +1,220 @@
-# 🦾 reBot Arm B601-DM 视觉夹取 Demo
+# reBot Arm B601-DM 视觉夹取（个人实践版）
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/Seeed-Projects/reBot-DevArm/main/media/v1.0.png" alt="reBot Arm B601">
-</p>
+基于 [Seeed reBot-DevArm-Grasp](https://github.com/Seeed-Projects/reBot-DevArm-Grasp) 与 [Wiki 教程](https://wiki.seeedstudio.com/cn/rebot_arm_b601_dm_grasping_demo/) 修改，记录本人硬件环境与调试过程。
 
-<p align="center">
-    <a href="./LICENSE">
-        <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT">
-    </a>
-    <img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python Version">
-    <img src="https://img.shields.io/badge/Platform-Ubuntu%2022.04+-orange.svg" alt="Platform">
-    <img src="https://img.shields.io/badge/Camera-Orbbec%20Gemini%202-green.svg" alt="Camera">
-    <img src="https://img.shields.io/badge/Detection-YOLO-yellow.svg" alt="YOLO">
-</p>
-
-<p align="center">
-  <strong>深度感知 · 目标检测 · 手眼标定 · 自主抓取 · 全开源</strong>
-</p>
-
-<p align="center">
-  <strong>
-    <a href="./README_zh.md">简体中文</a> &nbsp;|&nbsp;
-    <a href="./README.md">English</a>
-  </strong>
-</p>
+**个人仓库：** [ReDocTing/RobotArm_YOLO](https://github.com/ReDocTing/RobotArm_YOLO)
 
 ---
 
-## 📖 项目介绍
+## 当前环境信息
 
-**reBot Arm B601-DM 视觉夹取 Demo** 是基于 [reBot Arm B601](https://github.com/vectorBH6/reBotArm_control_py) 机械臂控制库与奥比中光 **Gemini 2** 深度相机的视觉抓取算法演示项目。系统通过 YOLO 模型实时识别桌面物体，利用 OBB 最小外接矩形估计夹取姿态，经手眼标定将相机坐标系下的抓取点变换到机械臂基坐标系，最终驱动机械臂完成自主抓取。
+| 项目 | 配置 |
+|------|------|
+| 主机系统 | Ubuntu 22.04+（内核 6.8.x） |
+| 架构 | x86_64 |
+| Python 环境 | Miniforge3，`conda` 环境名 **`rebotarm`**，Python **3.10.20** |
+| 工作目录 | `~/rebot_grasp` |
+| 机械臂 | reBot Arm B601-DM + 夹爪，USB2CAN（如 `/dev/ttyUSB0`） |
+| 深度相机 | **2× Intel RealSense D435**（非 Orbbec Gemini 2） |
+| 臂载相机（Eye-in-Hand） | serial: `819612071433` → `config/default.yaml` → `camera.serial` |
+| 墙上固定相机（预留） | serial: `819312070131` → `camera.wall_serial`（主流程未使用） |
+| 检测模型 | `models/yoloe-26l-seg.pt`，Ultralytics **8.4.x**，CPU 推理 |
+| 主要依赖 | `numpy 2.2.x`，`opencv-python 4.10`，`pyrealsense2`，`pin 3.9` |
+| PyTorch | CPU 版（见 `requirements-torch-cpu.txt`） |
+| 机械臂 SDK | `sdk/reBotArm_control_py`（需自行 clone，`sdk/` 不入库） |
+| 手眼标定结果 | `config/calibration/realsense_d435/hand_eye.npz` |
 
-### ✨ 核心功能
-
-- 📷 **深度感知** — Orbbec Gemini 2 提供对齐的 RGB + 深度帧（1280×720 @ 30fps）
-- 🔍 **目标检测** — 基于 YOLO 模型识别，支持开放词汇自定义类别
-- 📐 **姿态估计** — OBB 最小外接矩形短轴方向估计夹爪朝向，深度分位数估计抓取高度
-- 🔄 **坐标变换** — TSAI 手眼标定（Eye-in-Hand），将相机系抓取点变换到机械臂基坐标系
-- 🦾 **运动执行** — reBotArm_control_py IK + 轨迹控制器，内置夹爪力控状态机
-
----
-
-## ⚙️ 硬件配置
-
-| 组件 | 型号 / 要求 |
-|------|------------|
-| 机械臂 | reBot Arm B601-DM（DAMIAO 电机版） |
-| 深度相机 | Orbbec Gemini 2 |
-| 通信接口 | USB2CAN 串口桥接器（机械臂）；USB 3.0（相机） |
-| 主机 | Ubuntu 22.04+，Python 3.10，x86_64 |
-
-**接线说明**
-
-1. 将 Gemini 2 通过 USB 3.0 连接到主机
-2. 将 USB2CAN 适配器连接到机械臂 CAN 总线并插入主机 USB 口
-3. 配置设备权限：
+### 设备权限（每次上电后如需要）
 
 ```bash
-sudo chmod a+rw /dev/bus/usb/*/*   # Orbbec 相机
-sudo chmod 666 /dev/ttyUSB0        # USB2CAN（端口号按实际调整）
+sudo chmod a+rw /dev/bus/usb/*/*
+sudo chmod 666 /dev/ttyUSB0    # 按实际 CAN 串口修改
+```
+
+### 查看已连接的 RealSense
+
+```bash
+conda activate rebotarm
+cd ~/rebot_grasp
+python scripts/list_realsense_cameras.py --no-preview
 ```
 
 ---
 
-## 🚀 快速上手
+## 开发日志
 
-### Step 1. 克隆仓库
+### 2026-05-18
+
+**完成内容**
+
+- [x] 创建 conda 环境 `rebotarm`，安装项目依赖（解决 `numpy<2` 与 `pin`/YOLO 冲突，升级 `ultralytics 8.4`）
+- [x] 安装机械臂 SDK：`sdk/reBotArm_control_py`（修复 `pyproject.toml` 包发现后 `pip install -e .`）
+- [x] 改用 **双 Intel D435**：臂载 + 墙上固定；配置 `camera.serial` / `wall_serial`
+- [x] 新增 `scripts/list_realsense_cameras.py`，RealSense 按序列号打开
+- [x] 修复 OpenCV 4.10 下 ArUco `estimatePoseSingleMarkers` 不可用问题
+- [x] 下载 YOLO 权重 `yoloe-26l-seg.pt`，跑通 `object_detection.py`
+- [x] **Eye-in-Hand 手眼标定**，生成 `config/calibration/realsense_d435/hand_eye.npz`
+- [x] 调试抓取高度：深度分位数 + `depth_offset_mm` + 安全高度护栏（3 cm 测试方块）
+- [x] `main.py` dry-run / 实机试抓（空夹取、高度微调）
+
+**备注**
+
+- 官方 Wiki 中的 Orbbec `pyorbbecsdk` **本机未安装**，全程使用 `pyrealsense2`
+- 墙上相机当前仅配置 serial，不参与 `main.py` 抓取流程
+
+---
+
+## 环境与依赖安装（首次）
 
 ```bash
-git clone https://github.com/Seeed-Projects/reBot-DevArm-Grasp.git rebot_grasp
+# 1. 克隆（或拉取个人仓库）
+git clone https://github.com/ReDocTing/RobotArm_YOLO.git rebot_grasp
 cd rebot_grasp
-```
 
-### Step 2. 创建 conda 环境
-
-```bash
+# 2. conda 环境
 conda create -n rebotarm python=3.10 -y
 conda activate rebotarm
-```
 
-### Step 3. 安装 Python 依赖
+# 3. PyTorch（CPU，先装可避免拉取超大 CUDA 包）
+python -m pip install -r requirements-torch-cpu.txt
 
-```bash
-pip install -r requirements.txt
-```
+# 4. 其余依赖（务必用 conda 环境里的 python -m pip）
+python -m pip install -r requirements.txt
 
-`requirements.txt` 包含相机感知层及机械臂控制库所需的全部依赖：
-
-```
-# 感知 / 检测
-numpy<2.0.0
-scipy>=1.10
-opencv-python<4.10.0
-opencv-contrib-python<4.10.0
-ultralytics
-PyYAML>=6.0
-pyrealsense2>=2.54
-
-# 机械臂（reBotArm_control_py）
-pin>=3.9.0
-meshcat>=0.3.2
-matplotlib>=3.10.0
-motorbridge>=0.1.7
-```
-
-### Step 4. 安装机械臂控制库
-
-```bash
+# 5. 机械臂 SDK
+mkdir -p sdk
 git clone https://github.com/vectorBH6/reBotArm_control_py.git sdk/reBotArm_control_py
 cd sdk/reBotArm_control_py
-pip install -e .
+# 若 pip install -e . 报包发现错误，已为 pyproject 增加 packages.find
+python -m pip install -e .
 cd ../..
-```
 
-### Step 5. 安装 Orbbec SDK（pyorbbecsdk）
-
-本项目依赖 **pyorbbecsdk**（Orbbec SDK v2 的 Python 封装），但仓库默认不包含 `sdk/pyorbbecsdk`。请先进入 `sdk/` 目录自行拉取官方仓库。
-
-**方式一：从 GitHub 获取（推荐）**
-
-```bash
-# 安装编译依赖
-sudo apt-get install -y cmake build-essential libusb-1.0-0-dev
-
-cd sdk
-git clone https://github.com/orbbec/pyorbbecsdk.git
-cd pyorbbecsdk
-pip install -e .
-```
-
-**方式二：从 Gitee 获取**
-
-```bash
-cd sdk
-git clone https://gitee.com/orbbecdeveloper/pyorbbecsdk.git
-cd pyorbbecsdk
-pip install -e .
-```
-
-**验证安装**
-
-```bash
-python -c "import pyorbbecsdk; print('pyorbbecsdk OK')"
-```
-
-**配置 udev 规则（首次使用必须）**
-
-```bash
-cd sdk/pyorbbecsdk
-sudo bash scripts/install_udev_rules.sh
-sudo udevadm control --reload-rules && sudo udevadm trigger
-```
-
-**OrbbecViewer（可选，用于验证相机）**
-
-下载预编译包后运行 `OrbbecViewer`，可在运行 Demo 前确认相机连接和深度流正常。
-
-- GitHub：https://github.com/orbbec/OrbbecSDK_v2/releases
-- Gitee：https://gitee.com/orbbecdeveloper/OrbbecSDK_v2/releases
-
-**SDK 资料汇总**
-
-| 资料 | 链接 |
-|------|------|
-| Gemini 2 产品页 | https://www.orbbec.com.cn/index/Product/info.html?cate=38&id=51 |
-| 开发资料总链接 | https://www.orbbec.com.cn/index/Download2025/info.html?cate=121&id=1 |
-| Orbbec SDK v2 | https://github.com/orbbec/OrbbecSDK_v2 |
-| SDK v2 API 文档 | https://orbbec.github.io/docs/OrbbecSDKv2_API_User_Guide/ |
-| pyorbbecsdk | https://github.com/orbbec/pyorbbecsdk |
-| pyorbbecsdk 文档 | https://orbbec.github.io/pyorbbecsdk/index.html |
-| ROS2 Wrapper | https://github.com/orbbec/OrbbecSDK_ROS2/tree/v2-main |
-
----
-
-## 📁 目录结构
-
-```
-rebot_grasp/
-├── config/
-│   ├── default.yaml              # 主配置文件
-│   └── calibration/
-│       └── orbbec_gemini2/
-│           ├── intrinsics.npz    # 相机内参
-│           └── hand_eye.npz      # 手眼标定结果
-├── drivers/
-│   ├── camera/
-│   │   ├── base.py               # 相机抽象基类
-│   │   ├── orbbec_gemini2.py     # Gemini 2 驱动
-│   │   └── realsense.py          # RealSense 驱动（备用）
-│   └── robot/
-│       └── rebot_arm.py          # reBotArm 封装 + 夹爪状态机
-├── calibration/
-│   ├── aruco_pose.py             # ArUco 位姿估计
-│   └── hand_eye.py               # 手眼标定求解
-├── utils/
-│   ├── ordinary_grasp.py         # OBB 抓取姿态估计与可视化
-│   └── transforms.py             # 坐标变换工具
-├── scripts/
-│   ├── main.py                   # 主抓取程序
-│   ├── ordinary_grasp_pipeline.py
-│   ├── object_detection.py
-│   └── collect_handeye_eih.py
-├── sdk/
-│   ├── pyorbbecsdk/              # Orbbec SDK Python 封装
-│   └── reBotArm_control_py/      # reBot Arm SDK
-└── requirements.txt
+# 6. YOLO 权重（若 models/ 下没有）
+mkdir -p models
+wget -O models/yoloe-26l-seg.pt \
+  https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-26l-seg.pt
 ```
 
 ---
 
-## 🛠️ 配置说明
+## 日常使用：启动与调试指令
 
-### 配置文件
-
-编辑 `config/default.yaml`，确认以下关键参数：
-
-```yaml
-camera:
-  type: orbbec_gemini2
-  color_width: 1280
-  color_height: 720
-  fps: 30
-
-robot:
-  repo_root: null   # 自动识别 sdk/reBotArm_control_py
-  ready_pose:
-    x: 0.3
-    y: 0.0
-    z: 0.3
-    pitch: 1.0
-    duration: 3.0
-
-yolo:
-  model_name: "yoloe-26l-seg.pt"
-  device: "cpu"          # GPU 可改为 "cuda:0"
-  custom_classes:
-    - "yellow banana"
-    - "water bottle"
-    - "cup"
-```
-
-### 手眼标定（首次使用）
+以下命令均假设：
 
 ```bash
+conda activate rebotarm
+cd ~/rebot_grasp
+```
+
+### 1. 确认臂载相机
+
+```bash
+# 列出两台 D435
+python scripts/list_realsense_cameras.py --no-preview
+
+# 预览臂载相机（serial 与 default.yaml 一致）
+python scripts/list_realsense_cameras.py --serial 819612071433
+```
+
+### 2. 仅验证 YOLO 检测（不连机械臂）
+
+```bash
+python scripts/object_detection.py
+```
+
+按键：`Q` 退出。
+
+### 3. 仅验证抓取估计（不连机械臂）
+
+```bash
+python scripts/ordinary_grasp_pipeline.py
+```
+
+按键：鼠标左键测深度，`G` 打印姿态，`Q` 退出。
+
+### 4. 手眼标定（机械臂上电 + CAN + ArUco 贴桌面固定）
+
+标定前确认 `config/default.yaml` 中 `calibration.aruco.marker_length_m` 与打印尺寸一致（默认 10 cm）。
+
+```bash
+# 自动遍历姿态采样
 python scripts/collect_handeye_eih.py
-```
 
-自动模式下，机械臂会自动遍历 50 个预设位姿，检测到 ArUco 稳定后自动采样。正常结束或中途打断时，脚本都会尝试计算并保存标定结果；至少需要 5 个样本，建议 ≥15 个样本以获得更稳的结果。
-
-如需手动推动机械臂采集，可使用：
-
-```bash
+# 或手动推臂（重力补偿），Enter 采样
 python scripts/collect_handeye_eih.py --manual
 ```
 
-手动模式下，机械臂会进入重力补偿状态。将末端推到合适视角后按 `Enter` 采集，按 `c` 或 `q` 结束并计算。
+结果：`config/calibration/realsense_d435/hand_eye.npz`（建议 ≥15 组样本）。
+
+### 5. 主程序抓取
+
+```bash
+# 先 dry-run：只算位姿，机械臂不动
+python scripts/main.py --dry-run
+
+# 确认 [Grasp] grasp 的基座 z 合理后，实机抓取
+python scripts/main.py
+```
+
+运行时按键：
+
+| 键 | 功能 |
+|----|------|
+| `G` | 采当前帧并执行抓取（dry-run 仅打印） |
+| `R` | 恢复实时预览（按 G 后画面会 FROZEN） |
+| `Q` / `Esc` | 退出 |
+
+### 6. 深度 / 高度微调
+
+编辑 `config/default.yaml` → `grasp_pipeline.grasp`：
+
+| 参数 | 作用 |
+|------|------|
+| `depth_quantile` | 越大越“深”（俯视时一般更低） |
+| `depth_offset_mm` | 深度补偿（俯视 D435 正值≈往下） |
+| `approach_offset_m` | 手眼变换后再下探（米） |
+| `safety.min_grasp_z_m` | 基座最低高度护栏，防撞桌 |
+
+当前个人调参起点（3 cm 方块）：
+
+```yaml
+depth_quantile: 0.88
+depth_offset_mm: 14
+approach_offset_m: 0.008
+min_grasp_z_m: 0.030
+```
 
 ---
 
-## 🎬 Demo 内容介绍
+## 配置文件要点
 
-### `scripts/main.py` — 主抓取程序
+`config/default.yaml` 中与个人硬件相关的项：
 
-完整的视觉抓取流水线：
+```yaml
+camera:
+  type: realsense_d435
+  serial: "819612071433"      # 臂载
+  wall_serial: "819312070131" # 墙上（未接入主流程）
 
-1. 机械臂使能，移动到预备高位
-2. 实时相机预览 + YOLO 目标检测与实例分割
-3. OBB 短轴估计夹爪朝向，深度分位数估计抓取高度
-4. 按 `G` 冻结帧，经手眼变换计算机械臂目标位姿
-5. 机械臂移动到预抓取点 → 下降 → 夹爪闭合 → 提升 → 回预备位
-
-### `scripts/ordinary_grasp_pipeline.py` — 简化抓取测试
-
-不依赖机械臂，仅验证 OBB 抓取姿态估计和可视化效果，适合调试感知模块。
-
-### `scripts/object_detection.py` — 基础检测 Demo
-
-纯 YOLO 检测演示，实时显示检测框和置信度，无抓取逻辑。
-
-### `scripts/collect_handeye_eih.py` — 手眼标定数据采集
-
-Eye-in-Hand 模式手眼标定，支持自动遍历采样和手动重力补偿采样，使用 ArUco 标记，支持 TSAI / PARK / HORAUD 三种求解方法。
+calibration:
+  aruco:
+    marker_length_m: 0.1
+```
 
 ---
 
-## 📄 参考资料
+## 仓库说明
 
-- [reBotArm_control_py](https://github.com/vectorBH6/reBotArm_control_py) — 机械臂控制库
-- [reBot-DevArm](https://github.com/Seeed-Projects/reBot-DevArm) — reBot 机械臂开源项目
-- [Orbbec Gemini 2 产品页](https://www.orbbec.com.cn/index/Product/info.html?cate=38&id=51)
-- [Orbbec SDK v2](https://github.com/orbbec/OrbbecSDK_v2)
-- [pyorbbecsdk](https://github.com/orbbec/pyorbbecsdk)
-- [Ultralytics YOLOv11](https://github.com/ultralytics/ultralytics)
-
----
-
-## ☎ 联系我们
-
-- **技术支持**：[提交 Issue](https://github.com/Seeed-Projects/reBot-DevArm-Grasp/issues)
+| 路径 | 说明 |
+|------|------|
+| `sdk/` | 机械臂 / 相机 SDK，**.gitignore 忽略**，需本地 clone |
+| `models/` | YOLO 权重，**不入库** |
+| `config/calibration/realsense_d435/` | 手眼标定结果（已纳入本仓库） |
 
 ---
 
-<p align="center">
-  <strong>🌟 如果本项目对你有帮助，欢迎点个 Star！</strong>
-</p>
+## 参考链接
+
+- [Seeed Wiki：视觉夹取 Demo](https://wiki.seeedstudio.com/cn/rebot_arm_b601_dm_grasping_demo/)
+- [上游仓库 Seeed-Projects/reBot-DevArm-Grasp](https://github.com/Seeed-Projects/reBot-DevArm-Grasp)
+- [reBotArm_control_py](https://github.com/vectorBH6/reBotArm_control_py)
