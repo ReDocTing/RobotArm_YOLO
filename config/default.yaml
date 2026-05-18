@@ -1,6 +1,10 @@
 camera:
-  type: orbbec_gemini2
-  serial: null
+  # Intel RealSense D435（双机时务必指定 serial，避免打开错误相机）
+  type: realsense_d435
+  # 机械臂末端 eye-in-hand，用于抓取 / 手眼标定
+  serial: "819612071433"
+  # 墙上固定相机（当前主流程未使用，预留扩展）
+  wall_serial: "819312070131"
   color_width: 1280
   color_height: 720
   depth_width: 1280
@@ -47,5 +51,14 @@ yolo:
 grasp_pipeline:
   infer_every_live: 3
   grasp:
-    depth_quantile: 0.6
+    # 3cm 小方块：略抬高，避免夹尖蹭桌面（曾 18mm+12mm 偏低）
+    depth_quantile: 0.88
+    depth_offset_mm: 14
+    approach_offset_m: 0.008
     pregrasp_offset_m: 0.080
+  safety:
+    max_depth_offset_mm: 40
+    max_approach_offset_m: 0.04
+    # 允许 z≈0.035（3cm 方块顶面）；低于 3.0cm 仍中止防撞桌
+    min_grasp_z_m: 0.030
+    max_grasp_z_m: 0.12

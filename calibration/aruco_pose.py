@@ -8,6 +8,45 @@ import cv2
 import numpy as np
 
 
+def _marker_object_points(marker_length_m: float) -> np.ndarray:
+    """ArUco 平面四角 3D 坐标（标记坐标系，中心为原点）。"""
+    h = marker_length_m * 0.5
+    return np.array(
+        [[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]],
+        dtype=np.float64,
+    )
+
+
+def _estimate_marker_pose(
+    corner: np.ndarray,
+    marker_length_m: float,
+    K: np.ndarray,
+    D: np.ndarray,
+) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """估计单标记位姿；兼容 OpenCV 4.7+（无 estimatePoseSingleMarkers）。"""
+    img_pts = np.asarray(corner, dtype=np.float64).reshape(-1, 2)
+    obj_pts = _marker_object_points(marker_length_m)
+
+    if hasattr(cv2.aruco, "estimatePoseSingleMarkers"):
+        rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
+            [corner], marker_length_m, K, D
+        )
+        if rvecs is None:
+            return None, None
+        return rvecs[0, 0], tvecs[0, 0]
+
+    ok, rvec, tvec = cv2.solvePnP(
+        obj_pts,
+        img_pts,
+        K,
+        D,
+        flags=cv2.SOLVEPNP_IPPE_SQUARE,
+    )
+    if not ok:
+        return None, None
+    return rvec.flatten(), tvec.flatten()
+
+
 @dataclass
 class MarkerPose:
     """单个 ArUco 标记的检测结果。"""
@@ -74,13 +113,9 @@ class ArUcoDetector:
         best_z = float("inf")
 
         for corner, mid in zip(corners, ids_flat):
-            rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(
-                [corner], self._length, K, D
-            )
+            rvec, tvec = _estimate_marker_pose(corner, self._length, K, D)
             if rvec is None:
                 continue
-            rvec = rvec[0, 0]
-            tvec = tvec[0, 0]
             z = float(tvec[2])
             if z < best_z:
                 best_z = z
@@ -115,10 +150,8 @@ class ArUcoDetector:
         cv2.aruco.drawDetectedMarkers(vis, corners, ids)
 
         for corner in corners:
-            rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(
-                [corner], self._length, K, D
-            )
+            rvec, tvec = _estimate_marker_pose(corner, self._length, K, D)
             if rvec is not None:
-                cv2.drawFrameAxes(vis, K, D, rvec[0], tvec[0], axis_length)
+                cv2.drawFrameAxes(vis, K, D, rvec, tvec, axis_length)
 
         return vis

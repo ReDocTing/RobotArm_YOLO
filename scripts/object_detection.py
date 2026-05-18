@@ -85,8 +85,8 @@ def main():
 
     # ── 相机（统一通过驱动接口）──
     print(f"\n=== 初始化相机: {cam_type} ===")
-    sys.path.insert(0, str(project_root.parent))
-    from cameraws.drivers.camera import make_camera
+    sys.path.insert(0, str(project_root))
+    from drivers.camera import make_camera
 
     try:
         cam = make_camera(cfg)

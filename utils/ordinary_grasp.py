@@ -60,11 +60,21 @@ def estimate_grasps(
     depth_mm: np.ndarray,
     K: np.ndarray,
     depth_quantile: float = 0.75,
+    depth_offset_mm: float = 0.0,
 ) -> list[GraspPose]:
     grasps: list[GraspPose] = []
     for result in results:
         for index in range(detection_count(result)):
-            grasps.append(estimate_grasp(result, index, depth_mm, K, depth_quantile=depth_quantile))
+            grasps.append(
+                estimate_grasp(
+                    result,
+                    index,
+                    depth_mm,
+                    K,
+                    depth_quantile=depth_quantile,
+                    depth_offset_mm=depth_offset_mm,
+                )
+            )
     return grasps
 
 
@@ -107,6 +117,7 @@ def estimate_grasp(
     depth_mm: np.ndarray,
     K: np.ndarray,
     depth_quantile: float = 0.75,
+    depth_offset_mm: float = 0.0,
 ) -> GraspPose:
     class_name, conf, bbox_xyxy = _detection_meta(result, index)
     rect_points = _rect_points(result, index, depth_mm.shape, bbox_xyxy)
@@ -152,7 +163,10 @@ def estimate_grasp(
         )
 
     depth_quantile = float(np.clip(depth_quantile, 0.0, 1.0))
-    z_m = float(np.quantile(depth_values, depth_quantile) / 1000.0)
+    z_mm = float(np.quantile(depth_values, depth_quantile)) + float(depth_offset_mm)
+    if z_mm <= 0:
+        z_mm = float(np.median(depth_values))
+    z_m = z_mm / 1000.0
     position = _backproject(float(center[0]), float(center[1]), z_m, K)
     approach = _normalize(-position)
     if approach is None:

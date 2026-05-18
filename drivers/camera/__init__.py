@@ -34,10 +34,12 @@ def make_camera(cfg: dict) -> CameraDriver:
     _root     = Path(__file__).resolve().parent.parent.parent
     calib_dir = str(_root / "config" / "calibration" / cam_type)
 
+    serial = cam_cfg.get("serial")
+
     if "orbbec" in cam_type:
         return OrbbecGemini2(w, h, fps, calib_dir=calib_dir)
     elif "realsense" in cam_type:
-        return RealsenseCamera(w, h, fps, calib_dir=calib_dir)
+        return RealsenseCamera(w, h, fps, calib_dir=calib_dir, serial=serial)
     else:
         raise ValueError(
             f"不支持的相机类型: {cam_type!r}\n"

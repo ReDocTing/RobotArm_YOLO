@@ -75,10 +75,41 @@ def _cam_to_base(T_hand_eye: np.ndarray, robot: RebotArm) -> np.ndarray:
     return robot.get_tcp_pose() @ T_hand_eye
 
 
+def _load_grasp_depth_cfg(cfg: dict[str, Any]) -> tuple[float, float, float, dict[str, Any]]:
+    """返回 depth_quantile, depth_offset_mm, approach_offset_m, safety_cfg。"""
+    gp_cfg = cfg.get("grasp_pipeline", {})
+    grasp_cfg = gp_cfg.get("grasp", {})
+    safety_cfg = dict(gp_cfg.get("safety", {}))
+
+    depth_quantile = float(grasp_cfg.get("depth_quantile", 0.75))
+    max_depth_off = float(safety_cfg.get("max_depth_offset_mm", 40.0))
+    depth_offset_mm = float(np.clip(float(grasp_cfg.get("depth_offset_mm", 0.0)), -max_depth_off, max_depth_off))
+
+    max_app = float(safety_cfg.get("max_approach_offset_m", 0.04))
+    approach_offset_m = float(np.clip(float(grasp_cfg.get("approach_offset_m", 0.0)), 0.0, max_app))
+
+    return depth_quantile, depth_offset_mm, approach_offset_m, safety_cfg
+
+
+def _check_grasp_safe(grasp6d: tuple[float, ...], safety_cfg: dict[str, Any]) -> bool:
+    """基座系高度护栏，防止深度补偿过度导致撞桌或抬得过高。"""
+    zg = float(grasp6d[2])
+    min_z = safety_cfg.get("min_grasp_z_m")
+    max_z = safety_cfg.get("max_grasp_z_m")
+    if min_z is not None and zg < float(min_z):
+        print(f"[Safety] 抓取 z={zg:.3f}m 低于 min_grasp_z_m={float(min_z):.3f}m，已中止")
+        return False
+    if max_z is not None and zg > float(max_z):
+        print(f"[Safety] 抓取 z={zg:.3f}m 高于 max_grasp_z_m={float(max_z):.3f}m，已中止")
+        return False
+    return True
+
+
 def _transform_grasp(
     grasp: GraspPose,
     T_cam2base: np.ndarray,
     pregrasp_offset_m: float,
+    approach_offset_m: float = 0.0,
 ) -> tuple[tuple[float, ...], tuple[float, ...]]:
     T_grasp_cam = np.eye(4, dtype=np.float64)
     T_grasp_cam[:3, :3] = grasp.tcp_rotation.astype(np.float64)
@@ -88,6 +119,11 @@ def _transform_grasp(
     grasp_pos_base = T_grasp_base[:3, 3].copy()
     grasp_rot_base = canonicalize_parallel_gripper_tcp_rotation(T_grasp_base[:3, :3])
     T_grasp_base[:3, :3] = grasp_rot_base
+
+    if approach_offset_m > 0:
+        # tcp_x 指向接近/进入物体方向；正值 = 在抓取位基础上再下探一点
+        grasp_pos_base = grasp_pos_base + grasp_rot_base[:, 0] * float(approach_offset_m)
+        T_grasp_base[:3, 3] = grasp_pos_base
 
     pregrasp_pos_base = grasp_pos_base - grasp_rot_base[:, 0] * float(pregrasp_offset_m)
     T_pregrasp_base = np.eye(4, dtype=np.float64)
@@ -222,15 +258,21 @@ def main() -> int:
     yolo_cfg = cfg.get("yolo", {})
     det_cfg = cfg.get("detection", {})
     gp_cfg = cfg.get("grasp_pipeline", {})
-    grasp_cfg = gp_cfg.get("grasp", {})
 
     model_name = yolo_cfg.get("model_name", "yoloe-26s-seg.pt")
     yolo_device = yolo_cfg.get("device", "cpu")
     conf = float(det_cfg.get("conf_threshold", 0.25))
     iou = float(det_cfg.get("iou_threshold", 0.45))
+    grasp_cfg = gp_cfg.get("grasp", {})
     pregrasp_offset_m = float(grasp_cfg.get("pregrasp_offset_m", 0.08))
-    depth_quantile = float(grasp_cfg.get("depth_quantile", 0.75))
+    depth_quantile, depth_offset_mm, approach_offset_m, safety_cfg = _load_grasp_depth_cfg(cfg)
     infer_every = max(1, int(gp_cfg.get("infer_every_live", 2)))
+
+    if depth_offset_mm != 0 or approach_offset_m != 0:
+        print(
+            f"[Depth] quantile={depth_quantile:.2f}  offset={depth_offset_mm:+.1f}mm  "
+            f"approach_extra={approach_offset_m * 1000:.1f}mm"
+        )
 
     print(f"=== 加载 YOLO: {model_name} ===")
     model = YOLO(str(PROJECT_ROOT / "models" / model_name))
@@ -272,7 +314,13 @@ def main() -> int:
                     conf=conf,
                     iou=iou,
                 )
-                last_grasps = estimate_grasps(last_results, depth_mm, K, depth_quantile=depth_quantile)
+                last_grasps = estimate_grasps(
+                    last_results,
+                    depth_mm,
+                    K,
+                    depth_quantile=depth_quantile,
+                    depth_offset_mm=depth_offset_mm,
+                )
 
             status = f"{'FROZEN' if frozen else 'LIVE'} {fps_value:.1f}fps | G=夹取 R=恢复 Q=退出"
             best_live = select_best_grasp(last_grasps)
@@ -307,7 +355,13 @@ def main() -> int:
                     conf=conf,
                     iou=iou,
                 )
-                snap_grasps = estimate_grasps(snap_results, snap_depth, K, depth_quantile=depth_quantile)
+                snap_grasps = estimate_grasps(
+                    snap_results,
+                    snap_depth,
+                    K,
+                    depth_quantile=depth_quantile,
+                    depth_offset_mm=depth_offset_mm,
+                )
                 best = select_best_grasp(snap_grasps)
                 if best is None:
                     print("[G] 未找到有效夹取候选")
@@ -326,7 +380,18 @@ def main() -> int:
                     continue
 
                 T_cam2base = _cam_to_base(T_hand_eye, robot)
-                grasp6d, pre6d = _transform_grasp(best, T_cam2base, pregrasp_offset_m)
+                grasp6d, pre6d = _transform_grasp(
+                    best,
+                    T_cam2base,
+                    pregrasp_offset_m,
+                    approach_offset_m=approach_offset_m,
+                )
+                print(
+                    f"  → 相机深度 Z={float(best.position[2]):.3f}m（画面显示）  "
+                    f"基座抓取高度 z={float(grasp6d[2]):.3f}m（机械臂实际去的高度）"
+                )
+                if not _check_grasp_safe(grasp6d, safety_cfg):
+                    continue
                 _execute_grasp(robot, grasp6d, pre6d, ready_cfg, dry_run=args.dry_run)
 
     finally:

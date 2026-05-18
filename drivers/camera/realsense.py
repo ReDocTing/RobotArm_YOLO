@@ -22,11 +22,13 @@ class RealsenseCamera(CameraDriver):
         height: int = 720,
         fps: int = 30,
         calib_dir: Optional[str] = None,
+        serial: Optional[str] = None,
     ) -> None:
         self._w = width
         self._h = height
         self._fps = fps
         self._calib_dir = Path(calib_dir) if calib_dir else None
+        self._serial = str(serial).strip() if serial else None
 
         self._pipeline = None
         self._align = None
@@ -45,15 +47,19 @@ class RealsenseCamera(CameraDriver):
 
         pipeline = rs.pipeline()
         config = rs.config()
+        if self._serial:
+            config.enable_device(self._serial)
         config.enable_stream(rs.stream.color, self._w, self._h, rs.format.bgr8, self._fps)
         config.enable_stream(rs.stream.depth, self._w, self._h, rs.format.z16, self._fps)
 
         try:
             profile = pipeline.start(config)
         except RuntimeError as e:
+            hint = f"指定序列号 {self._serial} 的" if self._serial else ""
             raise RuntimeError(
-                f"RealSense 相机未找到: {e}\n"
-                "  可能原因: 未插入 / USB 接口松动 / 被其他程序占用"
+                f"RealSense {hint}相机未找到: {e}\n"
+                "  可能原因: 未插入 / USB 接口松动 / 被其他程序占用 / serial 配置错误\n"
+                "  运行 python scripts/list_realsense_cameras.py 查看已连接设备"
             ) from e
 
         self._pipeline = pipeline
@@ -76,8 +82,11 @@ class RealsenseCamera(CameraDriver):
         self._depth_scale_mm = ds * 1000.0
 
         self._D = self._load_distortion()
-        print(f"[RealsenseCamera] 就绪 ({intr.width}×{intr.height}, "
-              f"depth_scale={ds:.6f} m/unit)")
+        dev_serial = profile.get_device().get_info(rs.camera_info.serial_number)
+        print(
+            f"[RealsenseCamera] 就绪 serial={dev_serial} "
+            f"({intr.width}×{intr.height}, depth_scale={ds:.6f} m/unit)"
+        )
 
     def close(self) -> None:
         if self._pipeline is not None:

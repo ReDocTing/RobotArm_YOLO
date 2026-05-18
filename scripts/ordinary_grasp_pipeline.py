@@ -20,20 +20,18 @@ import sys
 from pathlib import Path
 
 import cv2
+import numpy as np
 import yaml
 from ultralytics import YOLO
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SEEED_ROOT = PROJECT_ROOT.parent
-for _path in (SEEED_ROOT,):
-    path_str = str(_path)
-    if path_str not in sys.path:
-        sys.path.insert(0, path_str)
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from cameraws.drivers.camera import make_camera
-from cameraws.utils.ordinary_grasp import draw_grasp, estimate_grasps, get_depth_mm, select_best_grasp
-from cameraws.utils.transforms import canonicalize_parallel_gripper_tcp_rotation, rotation_matrix_to_euler_zyx
+from drivers.camera import make_camera
+from utils.ordinary_grasp import draw_grasp, estimate_grasps, get_depth_mm, select_best_grasp
+from utils.transforms import canonicalize_parallel_gripper_tcp_rotation, rotation_matrix_to_euler_zyx
 
 
 clicked_point = {"u": -1, "v": -1}
@@ -75,7 +73,8 @@ def main():
     cam_type = str(cfg.get("camera", {}).get("type", "")).lower()
     yolo_cfg = cfg.get("yolo", {})
     det_cfg = cfg.get("detection", {})
-    grasp_cfg = cfg.get("grasp_pipeline", {}).get("grasp", {})
+    gp_cfg = cfg.get("grasp_pipeline", {})
+    grasp_cfg = gp_cfg.get("grasp", {})
 
     model_name = yolo_cfg.get("model_name", "yoloe-26s-seg.pt")
     device = yolo_cfg.get("device", "cpu")
@@ -84,6 +83,8 @@ def main():
     conf_thres = float(det_cfg.get("conf_threshold", 0.25))
     iou_thres = float(det_cfg.get("iou_threshold", 0.45))
     depth_quantile = float(grasp_cfg.get("depth_quantile", 0.75))
+    max_depth_off = float(gp_cfg.get("safety", {}).get("max_depth_offset_mm", 40.0))
+    depth_offset_mm = float(np.clip(float(grasp_cfg.get("depth_offset_mm", 0.0)), -max_depth_off, max_depth_off))
 
     print("=== 初始化 YOLO 模型 ===")
     model_path = models_dir / model_name
@@ -121,7 +122,13 @@ def main():
                 iou=iou_thres,
             )
 
-            grasps = estimate_grasps(results, depth_mm, K, depth_quantile=depth_quantile)
+            grasps = estimate_grasps(
+                results,
+                depth_mm,
+                K,
+                depth_quantile=depth_quantile,
+                depth_offset_mm=depth_offset_mm,
+            )
             for grasp in grasps:
                 draw_grasp(color_image, grasp)
 

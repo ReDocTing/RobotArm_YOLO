@@ -1,13 +1,18 @@
-numpy<2.0.0
-scipy>=1.10
-opencv-python<4.10.0
-opencv-contrib-python<4.10.0
-ultralytics
+# pin (Pinocchio) 3.7+ 依赖 cmeel-boost，要求 numpy 2.2.x（与 numpy<2 冲突）
+numpy>=2.2,<2.3
+scipy>=1.10,<1.16
+
+# 单装 opencv-python 即可（4.10+ 含 aruco）；勿与 opencv-contrib 混装
+opencv-python>=4.10.0.84,<4.11
+
+# yoloe-26 / yolo26 权重需 ultralytics 8.4+
+ultralytics>=8.4,<8.5
+
 PyYAML>=6.0
 pyrealsense2>=2.54
 
 # robotic arm (reBotArm_control_py) dependencies
 pin>=3.9.0
 meshcat>=0.3.2
-matplotlib>=3.10.0
+matplotlib>=3.10,<3.11
 motorbridge>=0.1.7
